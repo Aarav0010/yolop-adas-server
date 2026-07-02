@@ -1,0 +1,6 @@
+cpp/build/
+cpp/opencv/
+cpp/onnxruntime-win-x64-gpu*/
+cpp/opencv.exe
+__pycache__/
+*.zip

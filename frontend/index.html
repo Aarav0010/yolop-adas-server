@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="ADAS Lane Detection System — Real-time lane departure warning and lane centering assist dashboard.">
+  <meta name="theme-color" content="#0a0f1a">
+  <title>ADAS Lane Detection System</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ======== HEADER ======== -->
+  <header id="header">
+    <div class="header-left">
+      <span class="header-logo">🚗</span>
+      <h1 class="header-title">ADAS Lane Detection System</h1>
+    </div>
+    <div class="header-right">
+      <div id="fpsBadge" class="badge fps-badge" title="Frames per second">
+        <span class="badge-label">FPS</span>
+        <span id="fpsValue" class="badge-value">--</span>
+      </div>
+      <div id="liveIndicator" class="live-indicator" title="Live stream active">
+        <span class="live-dot"></span>
+        <span class="live-text">LIVE</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ======== MAIN GRID ======== -->
+  <main id="dashboard">
+
+    <!-- LEFT COLUMN — Video Feed -->
+    <section id="videoSection" class="panel video-panel" aria-label="Video Feed">
+      <div class="video-wrapper">
+        <img id="videoFeed" src="/video_feed" alt="ADAS Lane Detection Video Feed" draggable="false">
+        <div id="videoOverlay" class="video-overlay">
+          <span id="overlaySource" class="overlay-tag">--</span>
+          <span id="overlayFrame" class="overlay-tag overlay-frame">Frame --/--</span>
+        </div>
+        <!-- Connection-lost splash -->
+        <div id="videoOffline" class="video-offline hidden">
+          <div class="offline-icon">⚠️</div>
+          <div class="offline-text">Video feed disconnected</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT COLUMN — Panels -->
+    <aside id="sidebar">
+
+      <!-- 1. Vehicle Position Panel -->
+      <div id="positionPanel" class="panel card" aria-label="Vehicle Position">
+        <h2 class="card-title"><span class="card-icon">📍</span> Vehicle Position</h2>
+        <div id="positionViz" class="position-viz">
+          <!-- Lane lines -->
+          <div class="lane-line lane-left" id="laneLeft"></div>
+          <div class="lane-line lane-right" id="laneRight"></div>
+          <!-- Road surface markers -->
+          <div class="road-dashes">
+            <span></span><span></span><span></span><span></span><span></span>
+          </div>
+          <!-- Car icon (top-down) -->
+          <div id="carIcon" class="car-icon">
+            <svg viewBox="0 0 40 70" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="4" y="10" width="32" height="50" rx="8" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>
+              <rect x="8" y="14" width="24" height="12" rx="4" fill="#0ea5e9" opacity="0.5"/>
+              <rect x="8" y="44" width="24" height="10" rx="3" fill="#f43f5e" opacity="0.4"/>
+              <rect x="2" y="18" width="4" height="10" rx="2" fill="#facc15"/>
+              <rect x="34" y="18" width="4" height="10" rx="2" fill="#facc15"/>
+              <rect x="2" y="42" width="4" height="10" rx="2" fill="#ef4444"/>
+              <rect x="34" y="42" width="4" height="10" rx="2" fill="#ef4444"/>
+            </svg>
+          </div>
+          <!-- Offset readout -->
+          <div id="offsetReadout" class="offset-readout">0.00 px</div>
+        </div>
+      </div>
+
+      <!-- 2. Alert Panel -->
+      <div id="alertPanel" class="panel card" aria-label="Alert Status">
+        <h2 class="card-title"><span class="card-icon">🛡️</span> Alert Status</h2>
+        <div class="alert-grid">
+          <!-- LDW -->
+          <div class="alert-item">
+            <div class="alert-item-header">
+              <span id="ldwDot" class="status-dot safe"></span>
+              <span class="alert-label">LDW</span>
+            </div>
+            <span id="ldwStatus" class="alert-value">CENTERED</span>
+            <span id="ldwSeverity" class="alert-severity severity-safe">SAFE</span>
+          </div>
+          <!-- LCA -->
+          <div class="alert-item">
+            <div class="alert-item-header">
+              <span id="lcaDot" class="status-dot safe"></span>
+              <span class="alert-label">LCA</span>
+            </div>
+            <span id="lcaStatus" class="alert-value">CENTERED</span>
+            <span id="lcaSeverity" class="alert-severity severity-safe">NORMAL</span>
+          </div>
+        </div>
+        <!-- Alert banner -->
+        <div id="alertBanner" class="alert-banner hidden">
+          <span id="alertBannerIcon" class="alert-banner-icon">⚠️</span>
+          <span id="alertBannerMsg" class="alert-banner-msg"></span>
+        </div>
+      </div>
+
+      <!-- 3. Alert History -->
+      <div id="historyPanel" class="panel card" aria-label="Alert History">
+        <h2 class="card-title"><span class="card-icon">📋</span> Alert History</h2>
+        <div id="alertHistory" class="alert-history">
+          <div class="history-empty">No alerts recorded yet.</div>
+        </div>
+      </div>
+
+      <!-- 4. Source Controls -->
+      <div id="sourcePanel" class="panel card" aria-label="Source Controls">
+        <h2 class="card-title"><span class="card-icon">🎥</span> Input Source</h2>
+        <div class="source-buttons">
+          <button id="btnCamera"  class="source-btn" data-source="camera"  title="Switch to live camera">
+            <span class="source-btn-icon">📷</span> Camera
+          </button>
+          <button id="btnVideo1"  class="source-btn active" data-source="video1"  title="Switch to Video 1">
+            <span class="source-btn-icon">🎬</span> Video 1
+          </button>
+          <button id="btnVideo2"  class="source-btn" data-source="video2"  title="Switch to Video 2">
+            <span class="source-btn-icon">🎞️</span> Video 2
+          </button>
+        </div>
+      </div>
+
+    </aside>
+  </main>
+
+  <!-- ======== FOOTER ======== -->
+  <footer id="footer">
+    <div class="footer-stat">
+      <span class="footer-label">Lane Width</span>
+      <span id="footerLaneWidth" class="footer-value">-- px</span>
+    </div>
+    <div class="footer-divider"></div>
+    <div class="footer-stat">
+      <span class="footer-label">Confidence</span>
+      <span id="footerConfidence" class="footer-value">--%</span>
+    </div>
+    <div class="footer-divider"></div>
+    <div class="footer-stat">
+      <span class="footer-label">Processing</span>
+      <span id="footerProcessing" class="footer-value">-- ms</span>
+    </div>
+    <div class="footer-divider"></div>
+    <div class="footer-stat">
+      <span class="footer-label">Frame</span>
+      <span id="footerFrame" class="footer-value">-- / --</span>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
