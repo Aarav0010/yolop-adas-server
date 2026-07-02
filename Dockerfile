@@ -13,11 +13,21 @@ RUN apt-get update && apt-get install -y \
     libopencv-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Download and extract ONNX Runtime for Linux x64
-RUN wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-1.17.1.tgz \
-    && tar -xzf onnxruntime-linux-x64-1.17.1.tgz \
-    && mv onnxruntime-linux-x64-1.17.1 /opt/onnxruntime \
-    && rm onnxruntime-linux-x64-1.17.1.tgz
+# Download and extract ONNX Runtime based on architecture
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-1.17.1.tgz"; \
+        ORT_DIR="onnxruntime-linux-x64-1.17.1"; \
+    elif [ "$ARCH" = "aarch64" ]; then \
+        ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-aarch64-1.17.1.tgz"; \
+        ORT_DIR="onnxruntime-linux-aarch64-1.17.1"; \
+    else \
+        echo "Unsupported architecture: $ARCH" && exit 1; \
+    fi && \
+    wget -q $ORT_URL -O onnxruntime.tgz && \
+    tar -xzf onnxruntime.tgz && \
+    mv $ORT_DIR /opt/onnxruntime && \
+    rm onnxruntime.tgz
 
 # Set up working directory
 WORKDIR /app
