@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME: aarav0010/yolop-adas-server
 
 jobs:
   build-and-push-image:
