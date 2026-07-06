@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
     pkg-config \
+    libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up working directory
