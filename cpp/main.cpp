@@ -120,6 +120,8 @@ void inference_thread() {
             }
             if (frame.empty()) continue;
 
+            auto t0 = std::chrono::steady_clock::now();
+
             cv::Mat blob;
             cv::dnn::blobFromImage(frame, blob, 1.0 / 255.0, cv::Size(input_width, input_height), cv::Scalar(0, 0, 0), true, false);
 
@@ -138,8 +140,10 @@ void inference_thread() {
                 memory_info, blob_data, blob.total(), input_node_dims.data(), input_node_dims.size()
             );
 
-            auto start_inference = std::chrono::steady_clock::now();
+            auto t1 = std::chrono::steady_clock::now();
+            auto start_inference = t1;
             auto output_tensors = session.Run(Ort::RunOptions{nullptr}, input_node_names.data(), &input_tensor, 1, output_node_names.data(), 6);
+            auto t2 = std::chrono::steady_clock::now();
 
             float* da_seg = output_tensors[4].GetTensorMutableData<float>();
             float* ll_seg = output_tensors[5].GetTensorMutableData<float>();
@@ -489,6 +493,12 @@ void inference_thread() {
             cv::Mat da_mask_resized;
             cv::resize(da_mask, da_mask_resized, frame.size(), 0, 0, cv::INTER_NEAREST);
 
+            auto t3 = std::chrono::steady_clock::now();
+            std::cout << "[PROFILE] Preprocess: " << std::chrono::duration<float, std::milli>(t1 - t0).count() << "ms | "
+                      << "Inference: " << std::chrono::duration<float, std::milli>(t2 - t1).count() << "ms | "
+                      << "Postprocess/Fusion: " << std::chrono::duration<float, std::milli>(t3 - t2).count() << "ms" << std::endl;
+
+
             {
                 std::lock_guard<std::mutex> lock(state_mutex);
                 current_mask = mask_resized;
@@ -660,7 +670,7 @@ void capture_thread() {
 
         {
             std::lock_guard<std::mutex> lock(tel_mutex);
-            tel_frame_number = frame_count;
+            tel_frame_number = (current_source_type == "video") ? cap.get(cv::CAP_PROP_POS_FRAMES) : frame_count;
             tel_total_frames = total_f;
             if (current_fps > 0.0f) tel_fps = current_fps;
         }
