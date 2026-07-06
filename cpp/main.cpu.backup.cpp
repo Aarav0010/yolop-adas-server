@@ -12,6 +12,7 @@
 #endif
 
 #include <opencv2/opencv.hpp>
+#include <onnxruntime_cxx_api.h>
 
 #include "httplib.h"
 
@@ -61,11 +62,33 @@ float tel_processing_ms = 0.0f;
 int global_server_port = 8080;
 void inference_thread() {
     try {
-        cv::dnn::Net net = cv::dnn::readNetFromONNX("yolop.onnx");
-        net.setPreferableBackend(cv::dnn::DNN_BACKEND_CUDA);
-        net.setPreferableTarget(cv::dnn::DNN_TARGET_CUDA_FP16);
+        Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "YolopInference");
+        Ort::SessionOptions session_options;
 
-        std::vector<cv::String> output_node_names = {"det_out", "drive_area_seg", "lane_line_seg", "onnx::Sigmoid_1801", "2233", "2379"};
+        try {
+            OrtCUDAProviderOptions cuda_options;
+            cuda_options.device_id = 0;
+            cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
+            cuda_options.arena_extend_strategy = 0;
+            cuda_options.do_copy_in_default_stream = 1;
+            session_options.AppendExecutionProvider_CUDA(cuda_options);
+        } catch (const Ort::Exception&) {}
+
+        session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        session_options.SetIntraOpNumThreads(1);
+        session_options.SetInterOpNumThreads(1);
+
+    #ifdef _WIN32
+        const wchar_t* model_path = L"yolop.onnx";
+    #else
+        const char* model_path = "yolop.onnx";
+    #endif
+
+        Ort::Session session(env, model_path, session_options);
+
+        std::vector<const char*> input_node_names = {"images"};
+        std::vector<int64_t> input_node_dims = {1, 3, 640, 640};
+        std::vector<const char*> output_node_names = {"det_out", "drive_area_seg", "lane_line_seg", "onnx::Sigmoid_1801", "2233", "2379"};
 
         cv::KalmanFilter kf_left(3, 3, 0);
         cv::KalmanFilter kf_right(3, 3, 0);
@@ -112,16 +135,18 @@ void inference_thread() {
                 }
             }
 
+            auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+            Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+                memory_info, blob_data, blob.total(), input_node_dims.data(), input_node_dims.size()
+            );
+
             auto t1 = std::chrono::steady_clock::now();
             auto start_inference = t1;
-            
-            net.setInput(blob);
-            std::vector<cv::Mat> output_tensors;
-            net.forward(output_tensors, output_node_names);
+            auto output_tensors = session.Run(Ort::RunOptions{nullptr}, input_node_names.data(), &input_tensor, 1, output_node_names.data(), 6);
             auto t2 = std::chrono::steady_clock::now();
 
-            float* da_seg = (float*)output_tensors[4].data;
-            float* ll_seg = (float*)output_tensors[5].data;
+            float* da_seg = output_tensors[4].GetTensorMutableData<float>();
+            float* ll_seg = output_tensors[5].GetTensorMutableData<float>();
             size_t layer_size = 640 * 640;
             cv::Mat da_mask(640, 640, CV_8UC1, cv::Scalar(0));
             cv::Mat mask(640, 640, CV_8UC1, cv::Scalar(0));
@@ -132,7 +157,7 @@ void inference_thread() {
             }
 
             // NMS for object detection (Vehicle Occlusion Truncation)
-            float* det_data = (float*)output_tensors[0].data;
+            float* det_data = output_tensors[0].GetTensorMutableData<float>();
             std::vector<cv::Rect> boxes;
             std::vector<float> confidences;
             for (int i = 0; i < 25200; ++i) {
@@ -557,10 +582,7 @@ void capture_thread() {
     
     auto open_source = [&]() {
         if (cap.isOpened()) cap.release();
-        if (current_source_type == "video") {
-            std::string pipeline = "filesrc location=" + current_video_path + " ! qtdemux ! h264parse ! nvv4l2decoder ! nvvidconv ! video/x-raw, format=BGRx ! videoconvert ! video/x-raw, format=BGR ! appsink";
-            cap.open(pipeline, cv::CAP_GSTREAMER);
-        }
+        if (current_source_type == "video") cap.open(current_video_path);
         else cap.open(current_camera_index);
         source_changed = false;
     };
