@@ -62,7 +62,8 @@ int global_server_port = 8080;
 void inference_thread() {
     try {
         cv::dnn::Net net = cv::dnn::readNetFromONNX("yolop.onnx");
-        // CPU fallback occurs automatically here
+        net.setPreferableBackend(cv::dnn::DNN_BACKEND_CUDA);
+        net.setPreferableTarget(cv::dnn::DNN_TARGET_CUDA_FP16);
 
         std::vector<cv::String> output_node_names = {"det_out", "drive_area_seg", "lane_line_seg", "onnx::Sigmoid_1801", "2233", "2379"};
 
@@ -557,7 +558,8 @@ void capture_thread() {
     auto open_source = [&]() {
         if (cap.isOpened()) cap.release();
         if (current_source_type == "video") {
-            cap.open(current_video_path);
+            std::string pipeline = "filesrc location=" + current_video_path + " ! qtdemux ! h264parse ! nvv4l2decoder ! nvvidconv ! video/x-raw, format=BGRx ! videoconvert ! video/x-raw, format=BGR ! appsink";
+            cap.open(pipeline, cv::CAP_GSTREAMER);
         }
         else cap.open(current_camera_index);
         source_changed = false;

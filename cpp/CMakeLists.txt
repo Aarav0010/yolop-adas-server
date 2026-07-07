@@ -19,15 +19,13 @@ if(WIN32)
 endif()
 
 if(NOT WIN32)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(GST REQUIRED gstreamer-1.0 gstreamer-app-1.0 gstreamer-base-1.0 gstreamer-pbutils-1.0 gstreamer-audio-1.0 gstreamer-tag-1.0)
+    # GStreamer no longer required for CPU OpenCV build
 endif()
 
 add_executable(yolop_app main.cpp)
 
 target_include_directories(yolop_app PRIVATE 
     ${OpenCV_INCLUDE_DIRS}
-    ${GST_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR} # For httplib.h
 )
 
@@ -35,6 +33,5 @@ find_package(Threads REQUIRED)
 
 target_link_libraries(yolop_app PRIVATE
     ${OpenCV_LIBS}
-    ${GST_LIBRARIES}
     Threads::Threads
 )
