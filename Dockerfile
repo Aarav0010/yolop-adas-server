@@ -1,10 +1,9 @@
-FROM nvcr.io/nvidia/l4t-ml:r35.2.1-py3
+FROM dustynv/opencv:r35.2.1
 
 # Avoid interactive prompts during apt
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install necessary build tools
-# Note: OpenCV with CUDA and GStreamer is already included in the l4t-ml base image.
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \

@@ -658,6 +658,9 @@ void capture_thread() {
 }
 
 int main(int argc, char** argv) {
+    // Force OpenCV to distribute its heavy preprocessing and JPEG compression across all 12 CPU cores
+    cv::setNumThreads(12);
+
     int port = 8080;
     if (argc >= 2) {
         current_video_path = argv[1];
