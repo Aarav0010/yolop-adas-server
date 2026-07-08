@@ -629,6 +629,7 @@ void capture_thread() {
     int frame_count = 0;
 
     while (true) {
+        auto frame_start = std::chrono::high_resolution_clock::now();
         {
             std::lock_guard<std::mutex> lock(source_mutex);
             if (source_changed) open_source();
@@ -708,7 +709,11 @@ void capture_thread() {
             if (current_fps > 0.0f) tel_fps = current_fps;
         }
         
-        std::this_thread::sleep_for(std::chrono::milliseconds(33));
+        // Dynamic sleep to target 30 FPS
+        auto frame_end = std::chrono::high_resolution_clock::now();
+        int elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(frame_end - frame_start).count();
+        int sleep_time = std::max(1, 33 - elapsed_ms);
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time));
     }
 }
 
