@@ -20,6 +20,7 @@ endif()
 
 if(NOT WIN32)
     # GStreamer no longer required for CPU OpenCV build
+    target_link_libraries(yolop_app PRIVATE onnxruntime)
 endif()
 
 add_executable(yolop_app main.cpp)
@@ -35,3 +36,17 @@ target_link_libraries(yolop_app PRIVATE
     ${OpenCV_LIBS}
     Threads::Threads
 )
+
+# Add ONNX Runtime for Windows Local Test
+if(WIN32)
+    set(ONNXRUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime")
+    target_include_directories(yolop_app PRIVATE "${ONNXRUNTIME_DIR}/include")
+    target_link_directories(yolop_app PRIVATE "${ONNXRUNTIME_DIR}/lib")
+    target_link_libraries(yolop_app PRIVATE onnxruntime)
+    
+    add_custom_command(TARGET yolop_app POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${ONNXRUNTIME_DIR}/lib/onnxruntime.dll"
+        $<TARGET_FILE_DIR:yolop_app>
+    )
+endif()

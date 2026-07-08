@@ -12,6 +12,7 @@
 #endif
 
 #include <opencv2/opencv.hpp>
+#include <onnxruntime_cxx_api.h>
 
 #include "httplib.h"
 
@@ -61,10 +62,27 @@ float tel_processing_ms = 0.0f;
 int global_server_port = 8080;
 void inference_thread() {
     try {
-        cv::dnn::Net net = cv::dnn::readNetFromONNX("yolop.onnx");
-        // CPU fallback occurs automatically here
+        Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "yolop");
+        Ort::SessionOptions session_options;
+        session_options.SetIntraOpNumThreads(12);
+        
+#ifdef _WIN32
+        const wchar_t* model_path = L"yolop_static.onnx";
+#else
+        const char* model_path = "yolop_static.onnx";
+#endif
 
-        std::vector<cv::String> output_node_names = {"det_out", "drive_area_seg", "lane_line_seg", "onnx::Sigmoid_1801", "2233", "2379"};
+        Ort::Session session(env, model_path, session_options);
+        Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+
+        std::vector<const char*> input_names = {"images"};
+        std::vector<const char*> output_node_names = {
+            "/model.24/m.0/Conv_output_0", 
+            "/model.24/m.1/Conv_output_0", 
+            "/model.24/m.2/Conv_output_0",
+            "2233",
+            "2379"
+        };
 
         cv::KalmanFilter kf_left(3, 3, 0);
         cv::KalmanFilter kf_right(3, 3, 0);
@@ -114,13 +132,14 @@ void inference_thread() {
             auto t1 = std::chrono::steady_clock::now();
             auto start_inference = t1;
             
-            net.setInput(blob);
-            std::vector<cv::Mat> output_tensors;
-            net.forward(output_tensors, output_node_names);
+            std::vector<int64_t> input_shape = {1, 3, 640, 640};
+            Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info, blob_data, 1 * 3 * 640 * 640, input_shape.data(), 4);
+            
+            auto output_tensors = session.Run(Ort::RunOptions{nullptr}, input_names.data(), &input_tensor, 1, output_node_names.data(), 5);
             auto t2 = std::chrono::steady_clock::now();
 
-            float* da_seg = (float*)output_tensors[4].data;
-            float* ll_seg = (float*)output_tensors[5].data;
+            float* da_seg = output_tensors[3].GetTensorMutableData<float>();
+            float* ll_seg = output_tensors[4].GetTensorMutableData<float>();
             size_t layer_size = 640 * 640;
             cv::Mat da_mask(640, 640, CV_8UC1, cv::Scalar(0));
             cv::Mat mask(640, 640, CV_8UC1, cv::Scalar(0));
@@ -130,23 +149,61 @@ void inference_thread() {
                 if (ll_seg[layer_size + i] > ll_seg[i]) mask.data[i] = 255;
             }
 
-            // NMS for object detection (Vehicle Occlusion Truncation)
-            float* det_data = (float*)output_tensors[0].data;
+            // Manual Anchor Decoding for Static ONNX Model
             std::vector<cv::Rect> boxes;
             std::vector<float> confidences;
-            for (int i = 0; i < 25200; ++i) {
-                float conf = det_data[i * 6 + 4] * det_data[i * 6 + 5];
-                if (conf > 0.4f) {
-                    float cx = det_data[i * 6 + 0];
-                    float cy = det_data[i * 6 + 1];
-                    float w  = det_data[i * 6 + 2];
-                    float h  = det_data[i * 6 + 3];
-                    int left = std::max(0, (int)(cx - w / 2));
-                    int top = std::max(0, (int)(cy - h / 2));
-                    boxes.push_back(cv::Rect(left, top, (int)w, (int)h));
-                    confidences.push_back(conf);
+            
+            int strides[3] = {8, 16, 32};
+            float anchors[3][3][2] = {
+                {{3,9}, {5,11}, {4,20}},
+                {{7,18}, {6,39}, {12,31}},
+                {{19,50}, {38,81}, {68,157}}
+            };
+            
+            auto sigmoid = [](float x) { return 1.0f / (1.0f + std::exp(-x)); };
+
+            for (int s = 0; s < 3; ++s) {
+                int stride = strides[s];
+                int grid_w = 640 / stride;
+                int grid_h = 640 / stride;
+                float* data = output_tensors[s].GetTensorMutableData<float>();
+                int hw = grid_w * grid_h;
+
+                for (int a = 0; a < 3; ++a) {
+                    float anchor_w = anchors[s][a][0];
+                    float anchor_h = anchors[s][a][1];
+                    for (int y = 0; y < grid_h; ++y) {
+                        for (int x = 0; x < grid_w; ++x) {
+                            int base_idx = a * 6 * hw + y * grid_w + x;
+                            float conf_raw = data[base_idx + 4 * hw];
+                            float conf = sigmoid(conf_raw);
+                            
+                            float cls_raw = data[base_idx + 5 * hw];
+                            float cls_conf = sigmoid(cls_raw);
+                            
+                            float final_conf = conf * cls_conf;
+
+                            if (final_conf > 0.4f) {
+                                float dx = sigmoid(data[base_idx + 0 * hw]);
+                                float dy = sigmoid(data[base_idx + 1 * hw]);
+                                float dw = sigmoid(data[base_idx + 2 * hw]);
+                                float dh = sigmoid(data[base_idx + 3 * hw]);
+
+                                float cx = (dx * 2.0f - 0.5f + x) * stride;
+                                float cy = (dy * 2.0f - 0.5f + y) * stride;
+                                float w = std::pow(dw * 2.0f, 2.0f) * anchor_w;
+                                float h = std::pow(dh * 2.0f, 2.0f) * anchor_h;
+
+                                int left = std::max(0, (int)(cx - w / 2));
+                                int top = std::max(0, (int)(cy - h / 2));
+                                boxes.push_back(cv::Rect(left, top, (int)w, (int)h));
+                                confidences.push_back(final_conf);
+                            }
+                        }
+                    }
                 }
             }
+
             std::vector<int> nms_indices;
             cv::dnn::NMSBoxes(boxes, confidences, 0.4f, 0.5f, nms_indices);
 
@@ -651,7 +708,7 @@ void capture_thread() {
             if (current_fps > 0.0f) tel_fps = current_fps;
         }
         
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
 }
 
