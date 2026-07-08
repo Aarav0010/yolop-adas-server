@@ -18,12 +18,12 @@ if(WIN32)
     link_libraries(ws2_32 crypt32)
 endif()
 
+add_executable(yolop_app main.cpp)
+
 if(NOT WIN32)
     # GStreamer no longer required for CPU OpenCV build
     target_link_libraries(yolop_app PRIVATE onnxruntime)
 endif()
-
-add_executable(yolop_app main.cpp)
 
 target_include_directories(yolop_app PRIVATE 
     ${OpenCV_INCLUDE_DIRS}
