@@ -1,0 +1,12 @@
+cpp/build/
+cpp/opencv/
+cpp/onnxruntime/
+cpp/onnxruntime_gpu/
+cpp/onnxruntime-win-x64-*
+cpp/*.zip
+cpp/*.exe
+cpp/*.dll
+__pycache__/
+*.zip
+*.log
+.git/
