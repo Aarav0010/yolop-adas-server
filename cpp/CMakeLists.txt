@@ -39,14 +39,32 @@ target_link_libraries(yolop_app PRIVATE
 
 # Add ONNX Runtime for Windows Local Test
 if(WIN32)
-    set(ONNXRUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime")
+    option(USE_CUDA "Enable CUDA Support for Local GPU" OFF)
+    
+    if(USE_CUDA)
+        add_compile_definitions(USE_CUDA)
+        set(ONNXRUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime_gpu")
+    else()
+        set(ONNXRUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/onnxruntime")
+    endif()
+    
     target_include_directories(yolop_app PRIVATE "${ONNXRUNTIME_DIR}/include")
     target_link_directories(yolop_app PRIVATE "${ONNXRUNTIME_DIR}/lib")
     target_link_libraries(yolop_app PRIVATE onnxruntime)
     
-    add_custom_command(TARGET yolop_app POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${ONNXRUNTIME_DIR}/lib/onnxruntime.dll"
-        $<TARGET_FILE_DIR:yolop_app>
-    )
+    if(USE_CUDA)
+        add_custom_command(TARGET yolop_app POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${ONNXRUNTIME_DIR}/lib/onnxruntime.dll"
+            "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_shared.dll"
+            "${ONNXRUNTIME_DIR}/lib/onnxruntime_providers_cuda.dll"
+            $<TARGET_FILE_DIR:yolop_app>
+        )
+    else()
+        add_custom_command(TARGET yolop_app POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${ONNXRUNTIME_DIR}/lib/onnxruntime.dll"
+            $<TARGET_FILE_DIR:yolop_app>
+        )
+    endif()
 endif()

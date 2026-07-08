@@ -64,6 +64,13 @@ void inference_thread() {
     try {
         Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "yolop");
         Ort::SessionOptions session_options;
+        
+#ifdef USE_CUDA
+        OrtCUDAProviderOptions cuda_options;
+        cuda_options.device_id = 0;
+        session_options.AppendExecutionProvider_CUDA(cuda_options);
+#endif
+
         session_options.SetIntraOpNumThreads(12);
         
 #ifdef _WIN32
@@ -323,15 +330,37 @@ void inference_thread() {
                 int track_left = 319;
                 int track_right = 320;
                 
-                // Initialize bottom positions robustly
-                for (int x = 319; x >= 0; --x) {
-                    if (mask.data[639 * 640 + x] == 255) { track_left = x; break; }
+                // Initialize bottom positions robustly by scanning the bottom 40 rows
+                for (int y_start = 639; y_start >= 600; y_start -= 5) {
+                    if (track_left == 319) {
+                        for (int x = 319; x >= 0; --x) {
+                            if (mask.data[y_start * 640 + x] == 255) { track_left = x; break; }
+                        }
+                    }
+                    if (track_right == 320) {
+                        for (int x = 320; x < 640; ++x) {
+                            if (mask.data[y_start * 640 + x] == 255) { track_right = x; break; }
+                        }
+                    }
                 }
-                for (int x = 320; x < 640; ++x) {
-                    if (mask.data[639 * 640 + x] == 255) { track_right = x; break; }
+                
+                // Fallbacks if still not found
+                if (track_left == 319) {
+                    if (left_kf_initialized) {
+                        float ynorm = (639.0f - 360.0f) / 280.0f;
+                        track_left = kf_left.statePost.at<float>(0) * ynorm * ynorm + kf_left.statePost.at<float>(1) * ynorm + kf_left.statePost.at<float>(2);
+                    } else {
+                        track_left = 100;
+                    }
                 }
-                if (track_left == 319) track_left = 100;
-                if (track_right == 320) track_right = 540;
+                if (track_right == 320) {
+                    if (right_kf_initialized) {
+                        float ynorm = (639.0f - 360.0f) / 280.0f;
+                        track_right = kf_right.statePost.at<float>(0) * ynorm * ynorm + kf_right.statePost.at<float>(1) * ynorm + kf_right.statePost.at<float>(2);
+                    } else {
+                        track_right = 540;
+                    }
+                }
                 
                 for (int y = 639; y >= cutoff_y; y -= 10) {
                     int found_left = -1;
@@ -700,11 +729,11 @@ void capture_thread() {
             if (current_fps > 0.0f) tel_fps = current_fps;
         }
         
-        // Dynamic sleep to target 30 FPS
-        auto frame_end = std::chrono::high_resolution_clock::now();
-        int elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(frame_end - frame_start).count();
-        int sleep_time = std::max(1, 33 - elapsed_ms);
-        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time));
+        // Dynamic sleep removed to uncap FPS for GPU testing
+        // auto frame_end = std::chrono::high_resolution_clock::now();
+        // int elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(frame_end - frame_start).count();
+        // int sleep_time = std::max(1, 33 - elapsed_ms);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1)); // 1ms yield to prevent CPU spinning
     }
 }
 
@@ -727,6 +756,9 @@ int main(int argc, char** argv) {
 
     std::cout << "Starting web server on port " << port << "...\n" << std::flush;
     httplib::Server svr;
+    
+    // Serve the frontend dashboard
+    svr.set_base_dir("D:/Lane/frontend");
 
     svr.Get("/video_feed", [](const httplib::Request&, httplib::Response& res) {
         std::string boundary = "frame";
