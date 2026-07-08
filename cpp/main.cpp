@@ -280,12 +280,12 @@ void inference_thread() {
             // We rely purely on max_full_width for this now, as global_spread destroys valid dual-lane detections.
             
             // 3. Fallback: Reject massive horizontal paint bulges (like crosswalks) anywhere on the screen
-            if (max_full_width > 150) {
-                if (valid_lane_rows > 10) std::cout << "  -> REJECTED by max_full_width (>150)" << std::endl;
+            if (max_full_width > 70) {
+                if (valid_lane_rows > 10) std::cout << "  -> REJECTED by max_full_width (>70)" << std::endl;
                 valid_lane_rows = 0;
             }
             
-            if (valid_lane_rows > 4) {
+            if (valid_lane_rows > 25) {
                 std::cout << "  -> ACCEPTED LANE CHANGE!" << std::endl;
             }
             
@@ -531,13 +531,13 @@ void inference_thread() {
                 // If offset_count is high, it means we clearly see BOTH the left and right lane boundaries
                 // forming a coherent lane (which happens during a turn). 
                 // We should only trigger a lane change if we are crossing the line (which destroys the bounding pairs).
-                if (valid_lane_rows > 4 && offset_count < 10) {
+                if (valid_lane_rows > 25 && offset_count < 10) {
                     last_lane_change_time = now;
                     is_out_of_lane = false; // Reset "out of lane" during active lane change
                 }
 
                 // 2. Out of Lane Logic
-                if (offset_count > 10 && valid_lane_rows <= 4) {
+                if (offset_count > 10 && valid_lane_rows <= 25) {
                     int avg_offset = sum_center_offset / offset_count;
                     if (std::abs(avg_offset) > 50) { // Off center by 50+ pixels
                         if (!is_out_of_lane && (now - out_of_lane_start > std::chrono::seconds(2))) {
