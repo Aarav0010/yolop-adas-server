@@ -277,20 +277,11 @@ void inference_thread() {
             }
             
             // 2. Reject Crosswalks / Huge Text
-            // A crosswalk spans the entire road. A lane change line, even if diagonal,
-            // shouldn't spread more than 200 pixels globally across the bottom 140 rows.
-            int global_spread = 0;
-            if (global_max_paint_x != -1) {
-                global_spread = global_max_paint_x - global_min_paint_x;
-            }
-            if (global_spread > 250) {
-                if (valid_lane_rows > 0) std::cout << "  -> REJECTED by crosswalk spread (" << global_spread << " > 250)" << std::endl;
-                valid_lane_rows = 0;
-            }
+            // We rely purely on max_full_width for this now, as global_spread destroys valid dual-lane detections.
             
             // 3. Fallback: Reject massive horizontal paint bulges (like crosswalks) anywhere on the screen
-            if (max_full_width > 40) {
-                if (valid_lane_rows > 10) std::cout << "  -> REJECTED by max_full_width (>40)" << std::endl;
+            if (max_full_width > 150) {
+                if (valid_lane_rows > 10) std::cout << "  -> REJECTED by max_full_width (>150)" << std::endl;
                 valid_lane_rows = 0;
             }
             
