@@ -35,11 +35,11 @@ RUN mkdir build && cd build && \
     cmake .. && \
     make -j4
 
-# Expose the server port
-EXPOSE 8080
+# Expose the server ports
+EXPOSE 5002 43002
 
 # Move back to root so the app can find the ONNX model, the video, and the frontend folder
 WORKDIR /app
 
 # Run the application when the container starts
-ENTRYPOINT ["./cpp/build/yolop_app", "edited_ultimate_video.mp4", "8080"]
+ENTRYPOINT ["./cpp/build/yolop_app", "edited_ultimate_video.mp4"]

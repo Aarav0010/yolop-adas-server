@@ -4,3 +4,10 @@ cpp/onnxruntime-win-x64-gpu*/
 cpp/opencv.exe
 __pycache__/
 *.zip
+ *.dll
+*.onnx
+*.mp4
+*.tar
+app_output.log
+cpp/onnxruntime/
+cpp/onnxruntime_gpu/

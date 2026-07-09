@@ -67,7 +67,7 @@
       eventSource.close();
     }
 
-    eventSource = new EventSource('/events');
+    eventSource = new EventSource(`http://${window.location.hostname}:43002/events`);
 
     eventSource.onopen = () => {
       console.log('[ADAS] SSE connected');

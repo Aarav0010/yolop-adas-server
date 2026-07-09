@@ -16,8 +16,24 @@
 
 #include "httplib.h"
 
+#include <queue>
+#include <condition_variable>
+
+// Struct for Frame Identity
+struct FrameData {
+    int frame_id;
+    cv::Mat frame;
+    double timestamp_ms;
+};
+
+// Deterministic Bounded Queue
+std::mutex queue_mutex;
+std::condition_variable queue_cv;
+std::queue<FrameData> frame_queue;
+const size_t MAX_QUEUE_SIZE = 3;
+
 // Global shared frame buffer for MJPEG streaming
-std::mutex frame_mutex;
+std::mutex display_mutex;
 std::vector<uchar> latest_jpeg;
 
 // Global video source control
@@ -32,12 +48,7 @@ const int input_width = 640;
 const int input_height = 640;
 const int num_channels = 3;
 
-// Shared variables between threads
-std::mutex state_mutex;
-cv::Mat current_raw_frame;
-cv::Mat current_mask;
-cv::Mat current_da_mask;
-bool new_frame_available = false;
+// Shared state for inference telemetry
 auto last_lane_change_time = std::chrono::steady_clock::now() - std::chrono::hours(1);
 auto out_of_lane_start = std::chrono::steady_clock::now();
 bool is_out_of_lane = false;
@@ -71,7 +82,7 @@ void inference_thread() {
         session_options.AppendExecutionProvider_CUDA(cuda_options);
 #endif
 
-        session_options.SetIntraOpNumThreads(12);
+        session_options.SetIntraOpNumThreads(8);
         
 #ifdef _WIN32
         const wchar_t* model_path = L"yolop_static.onnx";
@@ -110,15 +121,16 @@ void inference_thread() {
         bool right_kf_initialized = false;
 
         while (true) {
-            cv::Mat frame;
+            FrameData data;
             {
-                std::lock_guard<std::mutex> lock(state_mutex);
-                if (!new_frame_available) {
-                    continue; // Busy wait (or could use condition variable, but busy wait is fine for now with small sleep)
-                }
-                frame = current_raw_frame.clone();
-                new_frame_available = false;
+                std::unique_lock<std::mutex> lock(queue_mutex);
+                queue_cv.wait(lock, []{ return !frame_queue.empty(); });
+                data = frame_queue.front();
+                frame_queue.pop();
             }
+            queue_cv.notify_all(); // Notify capture thread that there is space
+
+            cv::Mat frame = data.frame;
             if (frame.empty()) continue;
 
             auto t0 = std::chrono::steady_clock::now();
@@ -551,10 +563,9 @@ void inference_thread() {
 
 
             {
-                std::lock_guard<std::mutex> lock(state_mutex);
-                current_mask = mask_resized;
-                current_da_mask = da_mask_resized;
                 auto now = std::chrono::steady_clock::now();
+                bool is_changing = false;
+                bool out_of_lane_warning = false;
 
                 // 1. Lane Change Logic
                 // If offset_count is high, it means we clearly see BOTH the left and right lane boundaries
@@ -597,7 +608,7 @@ void inference_thread() {
                         tel_lateral_offset_ratio = tel_lateral_offset_px / 320.0f;
                     }
                     
-                    bool is_changing = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_lane_change_time).count() < 2000;
+                    is_changing = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_lane_change_time).count() < 2000;
                     
                     if (is_out_of_lane) {
                         tel_alert_message = "OUT OF LANE";
@@ -619,6 +630,29 @@ void inference_thread() {
                         tel_lca_severity = "NORMAL";
                     }
                 }
+
+                // DRAW OVERLAYS PERFECTLY SYNCED WITH THE EXACT FRAME ID
+                if (!da_mask_resized.empty()) {
+                    cv::Mat overlay = frame.clone();
+                    overlay.setTo(cv::Scalar(0, 255, 0), da_mask_resized); // Drivable area in Green
+                    cv::addWeighted(overlay, 0.4, frame, 0.6, 0, frame);
+                }
+                if (!mask_resized.empty()) {
+                    frame.setTo(cv::Scalar(0, 0, 255), mask_resized); // Red lines
+                }
+                if (is_changing) {
+                    cv::putText(frame, "LANE CHANGE DETECTED!", cv::Point(30, 80), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 0, 255), 3, cv::LINE_AA);
+                } else if (is_out_of_lane) {
+                    cv::putText(frame, "PLEASE CENTER VEHICLE", cv::Point(30, 80), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 165, 255), 3, cv::LINE_AA); // Orange color
+                }
+                
+                // Compress to JPEG for Web Server
+                std::vector<uchar> buf;
+                cv::imencode(".jpg", frame, buf, {cv::IMWRITE_JPEG_QUALITY, 60});
+                {
+                    std::lock_guard<std::mutex> dlock(display_mutex);
+                    latest_jpeg = std::move(buf);
+                }
             }
         }
     } catch (const std::exception& e) {
@@ -630,13 +664,19 @@ void inference_thread() {
 
 void capture_thread() {
     cv::VideoCapture cap;
+    double source_fps = 30.0;
     
     auto open_source = [&]() {
         if (cap.isOpened()) cap.release();
         if (current_source_type == "video") {
             cap.open(current_video_path);
+            source_fps = cap.get(cv::CAP_PROP_FPS);
+            if (source_fps <= 0.0) source_fps = 30.0;
         }
-        else cap.open(current_camera_index);
+        else {
+            cap.open(current_camera_index);
+            source_fps = 30.0;
+        }
         source_changed = false;
     };
 
@@ -649,10 +689,13 @@ void capture_thread() {
     int frame_count = 0;
 
     while (true) {
-        auto frame_start = std::chrono::high_resolution_clock::now();
         {
             std::lock_guard<std::mutex> lock(source_mutex);
-            if (source_changed) open_source();
+            if (source_changed) {
+                open_source();
+                frame_count = 0;
+                start_time = std::chrono::high_resolution_clock::now();
+            }
         }
 
         cv::Mat orig_frame;
@@ -666,74 +709,28 @@ void capture_thread() {
         cv::Mat frame;
         cv::resize(orig_frame, frame, cv::Size(854, 480));
 
-        cv::Mat mask_to_draw;
-        cv::Mat da_mask_to_draw;
-        bool is_changing = false;
-        bool out_of_lane_warning = false;
-        
+        // Absolute Deadline Pacing (Realtime)
+        auto deadline = start_time + std::chrono::microseconds((long long)(frame_count * 1000000.0 / source_fps));
+        std::this_thread::sleep_until(deadline);
+
+        // Bounded Producer Queue (Backpressure blocks here if inference is slow)
         {
-            std::lock_guard<std::mutex> lock(state_mutex);
-            current_raw_frame = frame.clone();
-            new_frame_available = true;
-            if (!current_mask.empty()) mask_to_draw = current_mask.clone();
-            if (!current_da_mask.empty()) da_mask_to_draw = current_da_mask.clone();
-            
-            auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_lane_change_time).count() < 2000) {
-                is_changing = true;
-            }
-            out_of_lane_warning = is_out_of_lane;
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            queue_cv.wait(lock, []{ return frame_queue.size() < MAX_QUEUE_SIZE; });
+            frame_queue.push({frame_count, frame, 0.0});
         }
-
-        if (!da_mask_to_draw.empty()) {
-            cv::Mat overlay = frame.clone();
-            overlay.setTo(cv::Scalar(0, 255, 0), da_mask_to_draw); // Drivable area in Green
-            cv::addWeighted(overlay, 0.4, frame, 0.6, 0, frame);
-        }
-
-        if (!mask_to_draw.empty()) {
-            frame.setTo(cv::Scalar(0, 0, 255), mask_to_draw); // Red lines on the edges
-        }
-        
-        if (is_changing) {
-            cv::putText(frame, "LANE CHANGE DETECTED!", cv::Point(30, 80), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 0, 255), 3, cv::LINE_AA);
-        } else if (out_of_lane_warning) {
-            cv::putText(frame, "PLEASE CENTER VEHICLE", cv::Point(30, 80), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 165, 255), 3, cv::LINE_AA); // Orange color
-        }
-
-        std::vector<uchar> buf;
-        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 60};
-        cv::imencode(".jpg", frame, buf, params);
-
-        {
-            std::lock_guard<std::mutex> lock(frame_mutex);
-            latest_jpeg = std::move(buf);
-        }
+        queue_cv.notify_all();
 
         frame_count++;
-        int total_f = 0;
-        if (current_source_type == "video") total_f = cap.get(cv::CAP_PROP_FRAME_COUNT);
+        int total_f = (current_source_type == "video") ? cap.get(cv::CAP_PROP_FRAME_COUNT) : 0;
 
-        float current_fps = 0.0f;
-        if (frame_count % 30 == 0) {
-            auto current_time = std::chrono::high_resolution_clock::now();
-            current_fps = 30.0f / std::chrono::duration<float>(current_time - start_time).count();
-            std::cout << "Stream FPS: " << current_fps << std::endl;
-            start_time = current_time;
-        }
-
+        float current_fps = source_fps; // In deterministic mode, we enforce source fps
         {
             std::lock_guard<std::mutex> lock(tel_mutex);
             tel_frame_number = (current_source_type == "video") ? cap.get(cv::CAP_PROP_POS_FRAMES) : frame_count;
             tel_total_frames = total_f;
-            if (current_fps > 0.0f) tel_fps = current_fps;
+            tel_fps = current_fps;
         }
-        
-        // Dynamic sleep removed to uncap FPS for GPU testing
-        // auto frame_end = std::chrono::high_resolution_clock::now();
-        // int elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(frame_end - frame_start).count();
-        // int sleep_time = std::max(1, 33 - elapsed_ms);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1)); // 1ms yield to prevent CPU spinning
     }
 }
 
@@ -741,66 +738,60 @@ int main(int argc, char** argv) {
     // Force OpenCV to distribute its heavy preprocessing and JPEG compression across all 12 CPU cores
     cv::setNumThreads(12);
 
-    int port = 8080;
+    int port_dash = 5002;
+    int port_logs = 43002;
     if (argc >= 2) {
         current_video_path = argv[1];
     }
-    if (argc >= 3) {
-        port = std::stoi(argv[2]);
-    }
-    global_server_port = port;
-
-    std::cout << "Starting threads for " << current_video_path << " on port " << port << "...\n" << std::flush;
+    
+    std::cout << "Starting threads for " << current_video_path << "...\\n" << std::flush;
     std::thread t_capture(capture_thread);
     std::thread t_inference(inference_thread);
 
-    std::cout << "Starting web server on port " << port << "...\n" << std::flush;
-    httplib::Server svr;
-    
-    // Serve the frontend dashboard
-    svr.set_base_dir("D:/Lane/frontend");
+    std::cout << "Starting Dashboard server on port " << port_dash << "...\\n" << std::flush;
+    std::thread t_dash([&]() {
+        httplib::Server dash_svr;
+        dash_svr.set_base_dir("D:/Lane/frontend");
+        
+        dash_svr.Get("/video_feed", [](const httplib::Request&, httplib::Response& res) {
+            std::string boundary = "frame";
+            res.set_content_provider(
+                "multipart/x-mixed-replace; boundary=" + boundary,
+                [boundary](size_t offset, httplib::DataSink& sink) {
+                    std::vector<uchar> jpeg;
+                    {
+                        std::lock_guard<std::mutex> lock(display_mutex);
+                        jpeg = latest_jpeg;
+                    }
+                    if (!jpeg.empty()) {
+                        std::string header = "--" + boundary + "\r\n"
+                            "Content-Type: image/jpeg\r\n"
+                            "Content-Length: " + std::to_string(jpeg.size()) + "\r\n\r\n";
+                        sink.write(header.data(), header.size());
+                        sink.write(reinterpret_cast<const char*>(jpeg.data()), jpeg.size());
+                        sink.write("\r\n", 2);
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20)); // cap at 50fps max to avoid spinning
+                    return true;
+                },
+                [](bool) {}
+            );
+        });
 
-    svr.Get("/video_feed", [](const httplib::Request&, httplib::Response& res) {
-        std::string boundary = "frame";
-        res.set_content_provider(
-            "multipart/x-mixed-replace; boundary=" + boundary,
-            [boundary](size_t offset, httplib::DataSink& sink) {
-                std::vector<uchar> jpeg;
-                {
-                    std::lock_guard<std::mutex> lock(frame_mutex);
-                    jpeg = latest_jpeg;
-                }
-                if (!jpeg.empty()) {
-                    std::string header = "--" + boundary + "\r\n"
-                        "Content-Type: image/jpeg\r\n"
-                        "Content-Length: " + std::to_string(jpeg.size()) + "\r\n\r\n";
-                    sink.write(header.data(), header.size());
-                    sink.write(reinterpret_cast<const char*>(jpeg.data()), jpeg.size());
-                    sink.write("\r\n", 2);
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(20)); // cap at 50fps max to avoid spinning
-                return true;
-            },
-            [](bool) {}
-        );
+        dash_svr.set_post_routing_handler([](const auto&, auto& res) {
+            res.set_header("Access-Control-Allow-Origin", "*");
+            res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+            res.set_header("Access-Control-Allow-Headers", "Content-Type");
+        });
+
+        dash_svr.set_mount_point("/", "frontend");
+        dash_svr.listen("0.0.0.0", port_dash);
     });
 
-    svr.Post("/switch_source", [](const httplib::Request& req, httplib::Response& res) {
-        std::lock_guard<std::mutex> lock(source_mutex);
-        if (req.has_param("type")) {
-            std::string type = req.get_param_value("type");
-            if (type == "video" || type == "camera") {
-                current_source_type = type;
-                source_changed = true;
-                res.set_content("{\"status\":\"ok\"}", "application/json");
-                return;
-            }
-        }
-        res.status = 400;
-        res.set_content("{\"error\":\"Invalid parameters\"}", "application/json");
-    });
-
-    svr.Get("/events", [](const httplib::Request&, httplib::Response& res) {
+    std::cout << "Starting Telemetry Log server on port " << port_logs << "...\\n" << std::flush;
+    httplib::Server logs_svr;
+    logs_svr.Get("/events", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
         res.set_header("Content-Type", "text/event-stream");
         res.set_header("Cache-Control", "no-cache");
         res.set_header("Connection", "keep-alive");
@@ -856,17 +847,15 @@ int main(int argc, char** argv) {
         );
     });
 
-    // Add CORS headers to all responses
-    svr.set_post_routing_handler([](const auto&, auto& res) {
+    logs_svr.set_post_routing_handler([](const auto&, auto& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
         res.set_header("Access-Control-Allow-Headers", "Content-Type");
     });
 
-    // Serve frontend static files
-    svr.set_mount_point("/", "frontend");
+    logs_svr.listen("0.0.0.0", port_logs);
 
-    svr.listen("0.0.0.0", port);
     t_inference.join();
+    t_dash.join();
     return 0;
 }
