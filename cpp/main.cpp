@@ -26,6 +26,21 @@ struct FrameData {
     double timestamp_ms;
 };
 
+// Decoupled AI Results Struct
+struct AIResults {
+    std::vector<cv::Rect> boxes;
+    std::vector<float> confidences;
+    cv::Mat mask;
+    cv::Mat da_mask;
+    bool is_changing = false;
+    bool is_out_of_lane = false;
+    float fps = 0.0f;
+    int valid_lane_rows = 0;
+};
+
+std::mutex ai_results_mutex;
+AIResults latest_ai_results;
+
 // Deterministic Bounded Queue
 std::mutex queue_mutex;
 std::condition_variable queue_cv;
@@ -83,6 +98,7 @@ void inference_thread() {
 #endif
 
         session_options.SetIntraOpNumThreads(8);
+        session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         
 #ifdef _WIN32
         const wchar_t* model_path = L"yolop_static.onnx";
@@ -568,19 +584,16 @@ void inference_thread() {
                 bool out_of_lane_warning = false;
 
                 // 1. Lane Change Logic
-                // If offset_count is high, it means we clearly see BOTH the left and right lane boundaries
-                // forming a coherent lane (which happens during a turn). 
-                // We should only trigger a lane change if we are crossing the line (which destroys the bounding pairs).
-                if (valid_lane_rows > 25 && offset_count < 10) {
+                if (valid_lane_rows > 15 && offset_count < 15) {
                     last_lane_change_time = now;
                     is_out_of_lane = false; // Reset "out of lane" during active lane change
                 }
 
                 // 2. Out of Lane Logic
-                if (offset_count > 10 && valid_lane_rows <= 25) {
+                if (offset_count > 10) {
                     int avg_offset = sum_center_offset / offset_count;
-                    if (std::abs(avg_offset) > 50) { // Off center by 50+ pixels
-                        if (!is_out_of_lane && (now - out_of_lane_start > std::chrono::seconds(2))) {
+                    if (std::abs(avg_offset) > 40) { // Off center by 40+ pixels
+                        if (!is_out_of_lane && (now - out_of_lane_start > std::chrono::milliseconds(1000))) {
                             is_out_of_lane = true;
                         }
                     } else {
@@ -631,27 +644,17 @@ void inference_thread() {
                     }
                 }
 
-                // DRAW OVERLAYS PERFECTLY SYNCED WITH THE EXACT FRAME ID
-                if (!da_mask_resized.empty()) {
-                    cv::Mat overlay = frame.clone();
-                    overlay.setTo(cv::Scalar(0, 255, 0), da_mask_resized); // Drivable area in Green
-                    cv::addWeighted(overlay, 0.4, frame, 0.6, 0, frame);
-                }
-                if (!mask_resized.empty()) {
-                    frame.setTo(cv::Scalar(0, 0, 255), mask_resized); // Red lines
-                }
-                if (is_changing) {
-                    cv::putText(frame, "LANE CHANGE DETECTED!", cv::Point(30, 80), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 0, 255), 3, cv::LINE_AA);
-                } else if (is_out_of_lane) {
-                    cv::putText(frame, "PLEASE CENTER VEHICLE", cv::Point(30, 80), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 165, 255), 3, cv::LINE_AA); // Orange color
-                }
-                
-                // Compress to JPEG for Web Server
-                std::vector<uchar> buf;
-                cv::imencode(".jpg", frame, buf, {cv::IMWRITE_JPEG_QUALITY, 60});
+                // SAVE DECOUPLED RESULTS
                 {
-                    std::lock_guard<std::mutex> dlock(display_mutex);
-                    latest_jpeg = std::move(buf);
+                    std::lock_guard<std::mutex> ai_lock(ai_results_mutex);
+                    latest_ai_results.boxes = boxes;
+                    latest_ai_results.confidences = confidences;
+                    if (!mask_resized.empty()) latest_ai_results.mask = mask_resized.clone();
+                    if (!da_mask_resized.empty()) latest_ai_results.da_mask = da_mask_resized.clone();
+                    latest_ai_results.is_changing = is_changing;
+                    latest_ai_results.is_out_of_lane = is_out_of_lane;
+                    latest_ai_results.fps = tel_fps;
+                    latest_ai_results.valid_lane_rows = valid_lane_rows;
                 }
             }
         }
@@ -713,13 +716,44 @@ void capture_thread() {
         auto deadline = start_time + std::chrono::microseconds((long long)(frame_count * 1000000.0 / source_fps));
         std::this_thread::sleep_until(deadline);
 
-        // Bounded Producer Queue (Backpressure blocks here if inference is slow)
+        // Non-blocking Producer Queue (Drops oldest frame if AI is too slow)
         {
             std::unique_lock<std::mutex> lock(queue_mutex);
-            queue_cv.wait(lock, []{ return frame_queue.size() < MAX_QUEUE_SIZE; });
-            frame_queue.push({frame_count, frame, 0.0});
+            if (frame_queue.size() >= MAX_QUEUE_SIZE) {
+                frame_queue.pop();
+            }
+            frame_queue.push({frame_count, frame.clone(), 0.0});
         }
         queue_cv.notify_all();
+
+        // DECOUPLED RENDERING: Draw latest AI results onto the fresh frame
+        AIResults current_ai;
+        {
+            std::lock_guard<std::mutex> ai_lock(ai_results_mutex);
+            current_ai = latest_ai_results;
+        }
+
+        if (!current_ai.da_mask.empty()) {
+            cv::Mat overlay = frame.clone();
+            overlay.setTo(cv::Scalar(0, 255, 0), current_ai.da_mask); // Drivable area in Green
+            cv::addWeighted(overlay, 0.4, frame, 0.6, 0, frame);
+        }
+        if (!current_ai.mask.empty()) {
+            frame.setTo(cv::Scalar(0, 0, 255), current_ai.mask); // Red lines
+        }
+        if (current_ai.is_changing) {
+            cv::putText(frame, "LANE CHANGE DETECTED!", cv::Point(30, 80), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 0, 255), 3, cv::LINE_AA);
+        } else if (current_ai.is_out_of_lane) {
+            cv::putText(frame, "PLEASE CENTER VEHICLE", cv::Point(30, 80), cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 165, 255), 3, cv::LINE_AA);
+        }
+
+        // Compress to JPEG for Web Server
+        std::vector<uchar> buf;
+        cv::imencode(".jpg", frame, buf, {cv::IMWRITE_JPEG_QUALITY, 60});
+        {
+            std::lock_guard<std::mutex> dlock(display_mutex);
+            latest_jpeg = std::move(buf);
+        }
 
         frame_count++;
         int total_f = (current_source_type == "video") ? cap.get(cv::CAP_PROP_FRAME_COUNT) : 0;
