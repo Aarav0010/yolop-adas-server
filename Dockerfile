@@ -12,13 +12,13 @@ RUN apt-get update && apt-get install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Install ONNX Runtime for aarch64 (Jetson Orin CPU)
-RUN wget https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-linux-aarch64-1.16.3.tgz && \
-    tar -zxvf onnxruntime-linux-aarch64-1.16.3.tgz && \
-    cp -r onnxruntime-linux-aarch64-1.16.3/include/* /usr/local/include/ && \
-    cp -r onnxruntime-linux-aarch64-1.16.3/lib/* /usr/local/lib/ && \
+# Install ONNX Runtime for x64 (Standard CPU)
+RUN wget https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-linux-x64-1.16.3.tgz && \
+    tar -zxvf onnxruntime-linux-x64-1.16.3.tgz && \
+    cp -r onnxruntime-linux-x64-1.16.3/include/* /usr/local/include/ && \
+    cp -r onnxruntime-linux-x64-1.16.3/lib/* /usr/local/lib/ && \
     ldconfig && \
-    rm -rf onnxruntime-linux-aarch64-1.16.3*
+    rm -rf onnxruntime-linux-x64-1.16.3*
 
 # Set up working directory
 WORKDIR /app
