@@ -584,7 +584,7 @@ void inference_thread() {
                 bool out_of_lane_warning = false;
 
                 // 1. Lane Change Logic
-                if (valid_lane_rows > 15 && offset_count < 15) {
+                if (valid_lane_rows > 5 && offset_count < 15) {
                     last_lane_change_time = now;
                     is_out_of_lane = false; // Reset "out of lane" during active lane change
                 }
